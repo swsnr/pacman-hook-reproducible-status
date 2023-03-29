@@ -8,6 +8,7 @@ import json
 from urllib.request import urlopen
 from ctypes import CDLL, Structure, c_char_p, c_uint, c_int, byref, POINTER
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
 
 libalpm = CDLL('libalpm.so')
@@ -36,6 +37,12 @@ libalpm.alpm_pkg_vercmp.argtypes = [c_char_p, c_char_p]
 libalpm.alpm_pkg_vercmp.restype = c_int
 
 
+REBUILDERS = [
+'https://reproducible.archlinux.org',
+'https://r-b.engineering.nyu.edu'
+]
+
+
 @contextmanager
 def alpm_handle():
     errno = c_uint()
@@ -47,26 +54,54 @@ def alpm_handle():
 
 
 def main():
-    with urlopen('https://reproducible.archlinux.org/api/v0/pkgs/list') as source:
-        packages = {p['name']: p for p in json.load(source)}
+    rebuilder_packages = {}
+    for rebuilder in REBUILDERS:
+        url = f'{rebuilder}/api/v0/pkgs/list'
+        basename = urlparse(url).netloc
+        try:
+            with urlopen(url) as source:
+                 rebuilder_packages[basename] = {p['name']: p for p in json.load(source)}
+        except Exception as error:
+            print(f'Rebuilder {rebuilder} failed: {error}', file=sys.stderr)
+            rebuilder_packages[basename] = {}
 
     with alpm_handle() as handle:
         localdb = libalpm.alpm_get_localdb(handle)
         for line in sys.stdin:
             pkgname = line.strip()
-            pkginfo = packages.get(pkgname)
-            if pkginfo:
+            pkg = libalpm.alpm_db_get_pkg(localdb, pkgname.encode('utf-8'))
+            if not pkg:
+                print(f'WARN: {pkgname} not found in local database!')
+                continue
+            pkgver = libalpm.alpm_pkg_get_version(pkg).decode('utf-8')
+            state_by_rebuilder = {}
+            for rebuilder, packages in rebuilder_packages.items():
+                pkginfo = packages.get(pkgname)
+                if not pkginfo:
+                    state_by_rebuilder[rebuilder] = ('missing', 'n/a')
+                    continue
                 status = pkginfo['status']
-                pkg = libalpm.alpm_db_get_pkg(localdb, pkgname.encode('utf-8'))
-                pkgver = libalpm.alpm_pkg_get_version(pkg).decode('utf-8')
                 repro_pkgver = pkginfo['version']
                 if libalpm.alpm_pkg_vercmp(pkgver.encode('utf-8'),
                                            repro_pkgver.encode('utf-8')) != 0:
-                    print(f'\033[33;1mVERSION MISMATCH:\033[0;33m: {pkgname} reproduced at {repro_pkgver}, but installed at {pkgver}\033[0m')
-                elif status != 'GOOD':
-                    print(f'\033[31;1mNOT REPRODUCED:\033[0m {pkgname} {pkgver} status {status}\033[0m')
+                    # If the version doesn't match the rebuilder doesn't have
+                    # the current version
+                    state_by_rebuilder[rebuilder] = ('version mismatch', repro_pkgver)
+                else:
+                    state_by_rebuilder[rebuilder] = (status, repro_pkgver)
+            if all(v[0] == 'GOOD' for v in state_by_rebuilder.values()):
+                # All rebuilders successfully reproduced the package
+                continue
+            elif any(v[0] == 'GOOD' for v in state_by_rebuilder.values()):
+                print(f'Package {pkgname} {pkgver} partially reproduced')
+                for rebuilder, (status, version) in state_by_rebuilder.items():
+                    if status != 'GOOD':
+                        print(f'   {rebuilder}: {version} {status}')
             else:
-                print(f'\033[33mUNKNOWN:\033[0m {pkgname} not reproduced by Archlinux (perhaps from AUR or 3rd party repo?)')
+                # No rebuilder successfully reproduced the package
+                print(f'Package {pkgname} {pkgver} not reproduced by any rebuilder')
+                for rebuilder, (status, version) in state_by_rebuilder.items():
+                    print(f'   {rebuilder}: {version} {status}')
 
 
 if __name__ == '__main__':
