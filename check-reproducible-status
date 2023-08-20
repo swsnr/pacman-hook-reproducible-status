@@ -46,7 +46,8 @@ REBUILDERS = [
 @contextmanager
 def alpm_handle():
     errno = c_uint()
-    handle = libalpm.alpm_initialize('/'.encode('utf-8'), '/var/lib/pacman'.encode('utf-8'), byref(errno))
+    handle = libalpm.alpm_initialize('/'.encode('utf-8'),
+        '/var/lib/pacman'.encode('utf-8'), byref(errno))
     if handle is None:
         raise ValueError(f'alpm_initialize failed with error {errno}')
     yield handle
@@ -60,7 +61,8 @@ def main():
         basename = urlparse(url).netloc
         try:
             with urlopen(url) as source:
-                 rebuilder_packages[basename] = {p['name']: p for p in json.load(source)}
+                 rebuilder_packages[basename] = {
+                    p['name']: p for p in json.load(source)}
         except Exception as error:
             print(f'Rebuilder {rebuilder} failed: {error}', file=sys.stderr)
             rebuilder_packages[basename] = {}
